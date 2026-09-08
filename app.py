@@ -500,7 +500,6 @@ def daftar_sheet_excel(uploaded_file):
 # ============================================================
 # FUNGSI BACA DATA DARI SHEET
 # ============================================================
-
 def baca_sheet_excel(
     uploaded_file,
     sheet_name
@@ -508,6 +507,8 @@ def baca_sheet_excel(
 
     try:
 
+        # Baca seluruh sheet tanpa header karena file Gama Statistika
+        # menggunakan header bertingkat (merged cell).
         df_raw = pd.read_excel(
             uploaded_file,
             sheet_name=sheet_name,
@@ -517,29 +518,145 @@ def baca_sheet_excel(
         if df_raw.empty:
             return None
 
-        baris_header = cari_baris_header(
-            df_raw
-        )
+        # ========================================================
+        # DETEKSI HEADER BERTINGKAT KHUSUS DATA KLIEN GAMA
+        # ========================================================
+        # Pada file asli:
+        # Baris header utama berisi "KONSULTAN"
+        # Baris berikutnya berisi:
+        # Nama Konsultan
+        # Total Bayar ke Konsultan (Rp)
+        # Sudah Transfer ke Konsultan (Rp)
+        # Kekurangan (Pelunasan (Rp))
+        #
+        # Karena "KONSULTAN" merupakan merged cell T9:W9,
+        # header harus digabung dengan baris berikutnya.
+        # ========================================================
 
-        header = (
-            df_raw
-            .iloc[baris_header]
-            .tolist()
-        )
+        baris_header_bertingkat = None
 
-        header = bersihkan_nama_kolom(
-            header
-        )
+        batas_scan = min(len(df_raw) - 1, 40)
 
-        df = df_raw.iloc[
-            baris_header + 1:
-        ].copy()
+        for idx in range(batas_scan):
 
-        df.columns = header
+            baris_atas = [
+                normalisasi_teks(x)
+                .replace(" ", "")
+                .replace("_", "")
+                .replace("-", "")
+                .replace("/", "")
+                .replace(".", "")
+                for x in df_raw.iloc[idx].tolist()
+            ]
 
-        df = bersihkan_baris_data(
-            df
-        )
+            baris_bawah = [
+                normalisasi_teks(x)
+                .replace(" ", "")
+                .replace("_", "")
+                .replace("-", "")
+                .replace("/", "")
+                .replace(".", "")
+                for x in df_raw.iloc[idx + 1].tolist()
+            ]
+
+            ada_total_bayar_konsultan = any(
+                (
+                    "totalbayarkekonsultan" in x
+                    or "totalbayarkonsultan" in x
+                )
+                for x in baris_bawah
+            )
+
+            ada_transfer_konsultan = any(
+                (
+                    "sudahtransferkekonsultan" in x
+                    or "sudahtransferkonsultan" in x
+                )
+                for x in baris_bawah
+            )
+
+            ada_konsultan = any(
+                "konsultan" in x
+                for x in baris_atas
+            )
+
+            if (
+                ada_konsultan
+                and (
+                    ada_total_bayar_konsultan
+                    or ada_transfer_konsultan
+                )
+            ):
+                baris_header_bertingkat = idx
+                break
+
+        if baris_header_bertingkat is not None:
+
+            idx_atas = baris_header_bertingkat
+            idx_bawah = baris_header_bertingkat + 1
+
+            header_atas = df_raw.iloc[idx_atas].tolist()
+            header_bawah = df_raw.iloc[idx_bawah].tolist()
+
+            header = []
+
+            for atas, bawah in zip(
+                header_atas,
+                header_bawah
+            ):
+
+                nilai_atas = (
+                    ""
+                    if pd.isna(atas)
+                    else str(atas).strip()
+                )
+
+                nilai_bawah = (
+                    ""
+                    if pd.isna(bawah)
+                    else str(bawah).strip()
+                )
+
+                # Jika sub-header tersedia, gunakan sub-header.
+                # Jika tidak, gunakan header utama.
+                if nilai_bawah:
+                    nama_header = nilai_bawah
+                else:
+                    nama_header = nilai_atas
+
+                header.append(nama_header)
+
+            df = df_raw.iloc[
+                idx_bawah + 1:
+            ].copy()
+
+            header = bersihkan_nama_kolom(header)
+            df.columns = header
+
+        else:
+
+            # Fallback untuk Excel dengan satu baris header.
+            baris_header = cari_baris_header(
+                df_raw
+            )
+
+            header = (
+                df_raw
+                .iloc[baris_header]
+                .tolist()
+            )
+
+            header = bersihkan_nama_kolom(
+                header
+            )
+
+            df = df_raw.iloc[
+                baris_header + 1:
+            ].copy()
+
+            df.columns = header
+
+        df = bersihkan_baris_data(df)
 
         return df
 
@@ -550,6 +667,7 @@ def baca_sheet_excel(
         )
 
         return None
+
 
 
 # ============================================================
@@ -1211,6 +1329,47 @@ COL_KONSULTAN = cari_kolom(
 )
 
 
+# ============================================================
+# KOLOM KEUANGAN KONSULTAN
+# ============================================================
+# Sesuai struktur Excel Gama Statistika:
+# - Total Bayar ke Konsultan (Rp) = total fee konsultan
+# - Sudah Transfer ke Konsultan (Rp) = total yang sudah dibayar
+# - Kekurangan Pelunasan (Rp) = total hutang kepada konsultan
+
+COL_TOTAL_BAYAR_KONSULTAN = cari_kolom(
+    df,
+    [
+        "Total Bayar ke Konsultan (Rp)",
+        "Total Bayar ke Konsultan",
+        "total bayar ke konsultan",
+        "total bayar konsultan"
+    ]
+)
+
+COL_SUDAH_TRANSFER_KONSULTAN = cari_kolom(
+    df,
+    [
+        "Sudah Transfer ke Konsultan (Rp)",
+        "Sudah Transfer ke Konsultan",
+        "sudah transfer ke konsultan",
+        "sudah transfer konsultan"
+    ]
+)
+
+COL_KEKURANGAN_PELUNASAN = cari_kolom(
+    df,
+    [
+        "Kekurangan (Pelunasan (Rp))",
+        "Kekurangan Pelunasan (Rp)",
+        "Kekurangan Pelunasan",
+        "Kekurangan",
+        "kekurangan pelunasan",
+        "kekurangan (pelunasan"
+    ]
+)
+
+
 COL_SOFTWARE = cari_kolom(
     df,
     [
@@ -1318,6 +1477,43 @@ df["piutang_clean"] = clean_numeric(
         selected_col_piutang
     ]
 )
+
+
+# ============================================================
+# DATA KEUANGAN KONSULTAN SESUAI KOLOM EXCEL
+# ============================================================
+
+if COL_TOTAL_BAYAR_KONSULTAN is not None:
+
+    df["total_fee_konsultan_clean"] = clean_numeric(
+        df[COL_TOTAL_BAYAR_KONSULTAN]
+    )
+
+else:
+
+    df["total_fee_konsultan_clean"] = 0.0
+
+
+if COL_SUDAH_TRANSFER_KONSULTAN is not None:
+
+    df["sudah_transfer_konsultan_clean"] = clean_numeric(
+        df[COL_SUDAH_TRANSFER_KONSULTAN]
+    )
+
+else:
+
+    df["sudah_transfer_konsultan_clean"] = 0.0
+
+
+if COL_KEKURANGAN_PELUNASAN is not None:
+
+    df["hutang_konsultan_clean"] = clean_numeric(
+        df[COL_KEKURANGAN_PELUNASAN]
+    )
+
+else:
+
+    df["hutang_konsultan_clean"] = 0.0
 
 
 # ============================================================
@@ -2031,6 +2227,170 @@ tampilkan_kpi(
     "kpi-value-danger"
 )
 
+
+# ============================================================
+# KPI HUTANG KEPADA KONSULTAN
+# ============================================================
+
+# Nilai diambil langsung dari kolom Excel:
+# Total Bayar ke Konsultan (Rp)
+# Sudah Transfer ke Konsultan (Rp)
+# Kekurangan Pelunasan (Rp)
+
+total_fee_konsultan = (
+    df_filter[
+        "total_fee_konsultan_clean"
+    ].sum()
+)
+
+
+total_sudah_dibayar_konsultan = (
+    df_filter[
+        "sudah_transfer_konsultan_clean"
+    ].sum()
+)
+
+
+total_hutang_konsultan = (
+    df_filter[
+        "hutang_konsultan_clean"
+    ].sum()
+)
+
+
+kh1, kh2, kh3 = st.columns(3)
+
+
+tampilkan_kpi(
+    kh1,
+    "TOTAL FEE KONSULTAN",
+    rupiah(total_fee_konsultan)
+)
+
+
+tampilkan_kpi(
+    kh2,
+    "SUDAH DIBAYARKAN KE KONSULTAN",
+    rupiah(total_sudah_dibayar_konsultan),
+    "kpi-value-success"
+)
+
+
+tampilkan_kpi(
+    kh3,
+    "TOTAL HUTANG KONSULTAN",
+    rupiah(total_hutang_konsultan),
+    "kpi-value-danger"
+)
+
+
+
+# ============================================================
+# JUDUL HUTANG KEPADA KONSULTAN
+# ============================================================
+
+st.markdown(
+    '<div class="section-title">'
+    '💸 Hutang Kepada Konsultan'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# TABEL HUTANG KEPADA KONSULTAN
+# ============================================================
+
+if COL_KONSULTAN is not None:
+
+    df_hutang_konsultan = df_filter.copy()
+
+    df_hutang_konsultan[
+        "konsultan_clean"
+    ] = (
+        df_hutang_konsultan[
+            COL_KONSULTAN
+        ]
+        .fillna("Tidak Diketahui")
+        .astype(str)
+        .str.strip()
+    )
+
+    df_hutang_konsultan[
+        "konsultan_clean"
+    ] = (
+        df_hutang_konsultan[
+            "konsultan_clean"
+        ]
+        .replace(
+            ["", "nan", "None"],
+            "Tidak Diketahui"
+        )
+    )
+
+    hutang_konsultan_stats = (
+        df_hutang_konsultan
+        .groupby(
+            "konsultan_clean",
+            as_index=False
+        )
+        .agg(
+            jumlah_project=(
+                "hutang_konsultan_clean",
+                "size"
+            ),
+            total_fee=(
+                "total_fee_konsultan_clean",
+                "sum"
+            ),
+            sudah_dibayar=(
+                "sudah_transfer_konsultan_clean",
+                "sum"
+            ),
+            total_hutang=(
+                "hutang_konsultan_clean",
+                "sum"
+            )
+        )
+        .sort_values(
+            "total_hutang",
+            ascending=False
+        )
+    )
+
+    hutang_konsultan_view = hutang_konsultan_stats.copy()
+
+    hutang_konsultan_view["total_fee"] = (
+        hutang_konsultan_view["total_fee"].apply(rupiah)
+    )
+
+    hutang_konsultan_view["sudah_dibayar"] = (
+        hutang_konsultan_view["sudah_dibayar"].apply(rupiah)
+    )
+
+    hutang_konsultan_view["total_hutang"] = (
+        hutang_konsultan_view["total_hutang"].apply(rupiah)
+    )
+
+    hutang_konsultan_view.columns = [
+        "Konsultan",
+        "Jumlah Project",
+        "Total Fee Konsultan",
+        "Sudah Transfer ke Konsultan",
+        "Kekurangan Pelunasan / Hutang"
+    ]
+
+    st.dataframe(
+        hutang_konsultan_view,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.warning(
+        "Kolom nama konsultan tidak ditemukan pada file Excel."
+    )
 
 # ============================================================
 # OMSET BERDASARKAN KATEGORI KLIEN
@@ -3343,7 +3703,6 @@ if COL_KONSULTAN is not None:
         use_container_width=True
     )
 
-
 # ============================================================
 # TOP KLIEN
 # ============================================================
@@ -3532,7 +3891,10 @@ kolom_tambahan = [
     "tahun",
     "bulan",
     "nama_bulan",
-    "label_cluster"
+    "label_cluster",
+    "total_fee_konsultan_clean",
+    "sudah_transfer_konsultan_clean",
+    "hutang_konsultan_clean"
 ]
 
 
@@ -3556,7 +3918,10 @@ kolom_ke_kanan = [
     "tahun",
     "bulan",
     "nama_bulan",
-    "label_cluster"
+    "label_cluster",
+    "total_fee_konsultan_clean",
+    "sudah_transfer_konsultan_clean",
+    "hutang_konsultan_clean"
 ]
 
 
@@ -3622,6 +3987,24 @@ if (
             rupiah
         )
     )
+
+
+# ============================================================
+# FORMAT KEUANGAN KONSULTAN
+# ============================================================
+
+for kolom_keuangan in [
+    "total_fee_konsultan_clean",
+    "sudah_transfer_konsultan_clean",
+    "hutang_konsultan_clean"
+]:
+
+    if kolom_keuangan in df_tampil_view.columns:
+
+        df_tampil_view[kolom_keuangan] = (
+            df_tampil_view[kolom_keuangan]
+            .apply(rupiah)
+        )
 
 
 # ============================================================
@@ -3757,7 +4140,10 @@ with col_dl2:
                     "Klien Baru",
                     "Repeat Order",
                     "Total Transaksi",
-                    "Total Omset"
+                    "Total Omset",
+                    "Total Fee Konsultan",
+                    "Sudah Dibayarkan ke Konsultan",
+                    "Total Hutang Konsultan"
                 ],
 
                 "Nilai": [
@@ -3778,7 +4164,19 @@ with col_dl2:
                     if "total_transaksi" in locals()
                     else 0,
 
-                    total_omset_export
+                    total_omset_export,
+
+                    total_fee_konsultan
+                    if "total_fee_konsultan" in locals()
+                    else 0,
+
+                    total_sudah_dibayar_konsultan
+                    if "total_sudah_dibayar_konsultan" in locals()
+                    else 0,
+
+                    total_hutang_konsultan
+                    if "total_hutang_konsultan" in locals()
+                    else 0
                 ]
             })
 
